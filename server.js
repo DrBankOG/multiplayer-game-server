@@ -8,16 +8,22 @@ const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 3000;
 
-// Game configuration
+// World and farm config
 const MAX_PLAYERS = 50;
 const MAP_WIDTH = 4000;
 const MAP_HEIGHT = 4000;
 
-// Farm configuration
 const FARM_WIDTH = 8;          // tiles per player (x)
 const FARM_HEIGHT = 8;         // tiles per player (y)
-const TILE_SIZE = 50;          // world units (used by client)
-const CROP_GROW_MS = 2 * 60 * 1000; // 2 minutes from water to ready
+const TILE_SIZE = 50;          // must match client
+const CROP_GROW_MS = 2 * 60 * 1000; // 2 minutes from water -> ready
+
+// Action durations (ms)
+const ACTION_DURATION = {
+  plant: 2000,
+  water: 1500,
+  harvest: 2500
+};
 
 // Game state
 let gameState = {
@@ -30,7 +36,7 @@ class Player {
     this.id = id;
     this.ws = ws;
 
-    // Farm allocation (grid of farms on big map)
+    // Allocate farm slot in a grid
     const farmsPerRow = 10;
     const farmXIndex = farmIndex % farmsPerRow;
     const farmYIndex = Math.floor(farmIndex / farmsPerRow);
@@ -49,14 +55,16 @@ class Player {
     this.food = 0;
     this.ping = 0;
 
-    // Farm tiles (1D array)
+    // Farm tiles
     this.farmWidth = FARM_WIDTH;
     this.farmHeight = FARM_HEIGHT;
     this.farm = Array.from({ length: FARM_WIDTH * FARM_HEIGHT }, () => ({
-      state: 'empty',        // 'empty' | 'seeded' | 'growing' | 'ready'
-      cropType: null,        // e.g. 'wheat'
+      state: 'empty',      // 'empty' | 'seeded' | 'growing' | 'ready'
+      cropType: null,
       plantedAt: null,
-      wateredAt: null
+      wateredAt: null,
+      currentAction: null, // 'plant' | 'water' | 'harvest' | null
+      actionEndsAt: null
     }));
   }
 
@@ -79,52 +87,37 @@ class Player {
   }
 }
 
-// Helper: broadcast to everyone
+// Helpers
 function broadcastMessage(message) {
   const data = JSON.stringify(message);
-  gameState.players.forEach(player => {
-    if (player.ws.readyState === WebSocket.OPEN) {
-      player.ws.send(data);
+  gameState.players.forEach(p => {
+    if (p.ws.readyState === WebSocket.OPEN) {
+      p.ws.send(data);
     }
   });
 }
 
-// Helper: broadcast full game state
 function broadcastGameState() {
-  const message = {
+  const msg = {
     type: 'gameStateUpdate',
     players: Array.from(gameState.players.values()).map(p => p.toJSON())
   };
-  broadcastMessage(message);
+  broadcastMessage(msg);
 }
 
-// Helper: collision
-function checkCollision(rect1, rect2) {
-  return (
-    rect1.x < rect2.x + rect2.width &&
-    rect1.x + rect1.width > rect2.x &&
-    rect1.y < rect2.y + rect2.height &&
-    rect1.y + rect1.height > rect2.y
-  );
-}
-
-// Host selection (lowest ping)
 function selectHost() {
   if (gameState.players.size === 0) {
     gameState.host = null;
     return;
   }
-
   let newHost = null;
   let lowestPing = Infinity;
-
   gameState.players.forEach(p => {
     if (p.ping < lowestPing) {
       lowestPing = p.ping;
       newHost = p;
     }
   });
-
   if (!gameState.host || gameState.host.id !== newHost.id) {
     gameState.host = newHost;
     broadcastMessage({
@@ -134,100 +127,108 @@ function selectHost() {
   }
 }
 
-// Crop helpers
 function getTile(player, tileIndex) {
   if (!player || !player.farm) return null;
   if (tileIndex == null || tileIndex < 0 || tileIndex >= player.farm.length) return null;
   return player.farm[tileIndex];
 }
 
-function handlePlant(player, tileIndex, cropType) {
+// Start an action on a tile (plant / water / harvest)
+function startActionOnTile(player, tileIndex, actionType) {
   const tile = getTile(player, tileIndex);
   if (!tile) return;
-  if (tile.state !== 'empty') return;
+  if (tile.currentAction) return;
 
-  tile.state = 'seeded';
-  tile.cropType = cropType || 'wheat';
-  tile.plantedAt = Date.now();
-  tile.wateredAt = null;
+  if (actionType === 'plant' && tile.state !== 'empty') return;
+  if (actionType === 'water' && tile.state !== 'seeded') return;
+  if (actionType === 'harvest' && tile.state !== 'ready') return;
 
-  broadcastMessage({
-    type: 'tileUpdate',
-    playerId: player.id,
-    tileIndex,
-    tile
-  });
-}
-
-function handleWater(player, tileIndex) {
-  const tile = getTile(player, tileIndex);
-  if (!tile) return;
-  if (tile.state !== 'seeded') return;
-
-  tile.state = 'growing';
-  tile.wateredAt = Date.now();
-
-  broadcastMessage({
-    type: 'tileUpdate',
-    playerId: player.id,
-    tileIndex,
-    tile
-  });
-}
-
-function handleHarvest(player, tileIndex) {
-  const tile = getTile(player, tileIndex);
-  if (!tile) return;
-  if (tile.state !== 'ready') return;
-
-  // Reward: treat all crops as "food" for now
-  player.food += 1;
-
-  const newTile = {
-    state: 'empty',
-    cropType: null,
-    plantedAt: null,
-    wateredAt: null
-  };
-  player.farm[tileIndex] = newTile;
-
-  broadcastMessage({
-    type: 'tileUpdate',
-    playerId: player.id,
-    tileIndex,
-    tile: newTile,
-    harvested: true,
-    food: player.food
-  });
-}
-
-// Growth tick: growing -> ready after CROP_GROW_MS
-function updateCropGrowth() {
   const now = Date.now();
-  const changed = [];
+  const duration = ACTION_DURATION[actionType];
+  if (!duration) return;
+
+  tile.currentAction = actionType;
+  tile.actionEndsAt = now + duration;
+
+  broadcastMessage({
+    type: 'tileActionStart',
+    playerId: player.id,
+    tileIndex,
+    actionType,
+    actionEndsAt: tile.actionEndsAt
+  });
+}
+
+// Tick: finish actions and crop growth
+function updateActionsAndGrowth() {
+  const now = Date.now();
+  const finishedActions = [];
+  const grownTiles = [];
 
   gameState.players.forEach(player => {
     player.farm.forEach((tile, idx) => {
+      // Finish actions
+      if (tile.currentAction && tile.actionEndsAt && now >= tile.actionEndsAt) {
+        const action = tile.currentAction;
+        tile.currentAction = null;
+        tile.actionEndsAt = null;
+
+        if (action === 'plant') {
+          tile.state = 'seeded';
+          tile.cropType = 'wheat';
+          tile.plantedAt = now;
+          tile.wateredAt = null;
+        } else if (action === 'water') {
+          tile.state = 'growing';
+          tile.wateredAt = now;
+        } else if (action === 'harvest') {
+          player.food += 1;
+          tile.state = 'empty';
+          tile.cropType = null;
+          tile.plantedAt = null;
+          tile.wateredAt = null;
+        }
+
+        finishedActions.push({
+          playerId: player.id,
+          tileIndex: idx,
+          tile,
+          action
+        });
+      }
+
+      // Growth: growing → ready
       if (tile.state === 'growing' && tile.wateredAt) {
         if (now - tile.wateredAt >= CROP_GROW_MS) {
           tile.state = 'ready';
-          changed.push({ playerId: player.id, tileIndex: idx, tile });
+          grownTiles.push({ playerId: player.id, tileIndex: idx, tile });
         }
       }
     });
   });
 
-  changed.forEach(c => {
+  finishedActions.forEach(f => {
+    broadcastMessage({
+      type: 'tileActionEnd',
+      playerId: f.playerId,
+      tileIndex: f.tileIndex,
+      tile: f.tile,
+      action: f.action,
+      food: f.action === 'harvest' ? gameState.players.get(f.playerId).food : undefined
+    });
+  });
+
+  grownTiles.forEach(g => {
     broadcastMessage({
       type: 'tileUpdate',
-      playerId: c.playerId,
-      tileIndex: c.tileIndex,
-      tile: c.tile
+      playerId: g.playerId,
+      tileIndex: g.tileIndex,
+      tile: g.tile
     });
   });
 }
 
-// WebSocket connection handler
+// WebSocket connections
 wss.on('connection', (ws) => {
   const playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -246,7 +247,6 @@ wss.on('connection', (ws) => {
 
   console.log(`Player ${playerId} joined. Total: ${gameState.players.size}`);
 
-  // Join response
   ws.send(JSON.stringify({
     type: 'joinResponse',
     playerId,
@@ -254,13 +254,11 @@ wss.on('connection', (ws) => {
     mapHeight: MAP_HEIGHT
   }));
 
-  // Let everyone know player count
   broadcastMessage({
     type: 'playerCount',
     count: gameState.players.size
   });
 
-  // Send initial state to new player
   ws.send(JSON.stringify({
     type: 'gameStateUpdate',
     players: Array.from(gameState.players.values()).map(p => p.toJSON())
@@ -269,30 +267,30 @@ wss.on('connection', (ws) => {
   selectHost();
 
   ws.on('message', (data) => {
-    let message;
+    let msg;
     try {
-      message = JSON.parse(data);
+      msg = JSON.parse(data);
     } catch (e) {
-      console.error('Bad message JSON', e);
+      console.error('Bad JSON', e);
       return;
     }
 
     const p = gameState.players.get(playerId);
     if (!p) return;
 
-    switch (message.type) {
+    switch (msg.type) {
       case 'ping':
         ws.send(JSON.stringify({ type: 'pong' }));
         break;
 
       case 'getPing':
-        p.ping = message.ping || 0;
+        p.ping = msg.ping || 0;
         selectHost();
         break;
 
       case 'playerMove':
-        p.x = Math.max(0, Math.min(message.x, MAP_WIDTH - p.width));
-        p.y = Math.max(0, Math.min(message.y, MAP_HEIGHT - p.height));
+        p.x = Math.max(0, Math.min(msg.x, MAP_WIDTH - p.width));
+        p.y = Math.max(0, Math.min(msg.y, MAP_HEIGHT - p.height));
         broadcastMessage({
           type: 'playerMoved',
           playerId,
@@ -302,21 +300,21 @@ wss.on('connection', (ws) => {
         break;
 
       case 'plant':
-        handlePlant(p, message.tileIndex, message.cropType);
+        startActionOnTile(p, msg.tileIndex, 'plant');
         break;
 
       case 'water':
-        handleWater(p, message.tileIndex);
+        startActionOnTile(p, msg.tileIndex, 'water');
         break;
 
       case 'harvest':
-        handleHarvest(p, message.tileIndex);
+        startActionOnTile(p, msg.tileIndex, 'harvest');
         break;
     }
   });
 
   ws.on('close', () => {
-    console.log(`Player ${playerId} disconnected.`);
+    console.log(`Player ${playerId} disconnected`);
     gameState.players.delete(playerId);
 
     broadcastMessage({
@@ -337,11 +335,11 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Periodic updates
+// Periodic tick
 setInterval(() => {
-  updateCropGrowth();
+  updateActionsAndGrowth();
   broadcastGameState();
-}, 2000);
+}, 200);
 
 // Health endpoint
 app.get('/health', (req, res) => {
