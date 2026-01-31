@@ -16,6 +16,7 @@ const MAP_HEIGHT = 4000;
 const FARM_WIDTH = 8;          // tiles per player (x)
 const FARM_HEIGHT = 8;         // tiles per player (y)
 const TILE_SIZE = 50;          // must match client
+const FARM_SPACING = 100;      // **NEW: pixels between farms**
 const CROP_GROW_MS = 2 * 60 * 1000; // 2 minutes from water -> ready
 
 // Action durations (ms)
@@ -36,19 +37,24 @@ class Player {
     this.id = id;
     this.ws = ws;
 
-    // Allocate farm slot in a grid
-    const farmsPerRow = 10;
+    // **FIXED: Allocate farm slot in a grid WITH SPACING**
+    const farmsPerRow = 8; // Reduced from 10 to give more space
     const farmXIndex = farmIndex % farmsPerRow;
     const farmYIndex = Math.floor(farmIndex / farmsPerRow);
 
-    this.farmOriginX = farmXIndex * FARM_WIDTH * TILE_SIZE + 50;
-    this.farmOriginY = farmYIndex * FARM_HEIGHT * TILE_SIZE + 50;
+    // Calculate farm size in pixels
+    const farmPixelWidth = FARM_WIDTH * TILE_SIZE;
+    const farmPixelHeight = FARM_HEIGHT * TILE_SIZE;
+
+    // **FIXED: Add spacing between farms**
+    this.farmOriginX = 100 + farmXIndex * (farmPixelWidth + FARM_SPACING);
+    this.farmOriginY = 100 + farmYIndex * (farmPixelHeight + FARM_SPACING);
 
     // Avatar position (center of farm)
     this.width = 25;
     this.height = 25;
-    this.x = this.farmOriginX + (FARM_WIDTH * TILE_SIZE) / 2 - this.width / 2;
-    this.y = this.farmOriginY + (FARM_HEIGHT * TILE_SIZE) / 2 - this.height / 2;
+    this.x = this.farmOriginX + farmPixelWidth / 2 - this.width / 2;
+    this.y = this.farmOriginY + farmPixelHeight / 2 - this.height / 2;
 
     // Stats
     this.wood = 0;
