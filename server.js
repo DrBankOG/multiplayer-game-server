@@ -16,7 +16,7 @@ const MAP_HEIGHT = 4000;
 const FARM_WIDTH = 8;          // tiles per player (x)
 const FARM_HEIGHT = 8;         // tiles per player (y)
 const TILE_SIZE = 50;          // must match client
-const FARM_SPACING = 100;      // **NEW: pixels between farms**
+const FARM_SPACING = 100;      // pixels between farms
 const CROP_GROW_MS = 2 * 60 * 1000; // 2 minutes from water -> ready
 
 // Action durations (ms)
@@ -37,8 +37,8 @@ class Player {
     this.id = id;
     this.ws = ws;
 
-    // **FIXED: Allocate farm slot in a grid WITH SPACING**
-    const farmsPerRow = 8; // Reduced from 10 to give more space
+    // Allocate farm slot in a grid WITH SPACING
+    const farmsPerRow = 8;
     const farmXIndex = farmIndex % farmsPerRow;
     const farmYIndex = Math.floor(farmIndex / farmsPerRow);
 
@@ -46,7 +46,7 @@ class Player {
     const farmPixelWidth = FARM_WIDTH * TILE_SIZE;
     const farmPixelHeight = FARM_HEIGHT * TILE_SIZE;
 
-    // **FIXED: Add spacing between farms**
+    // Add spacing between farms
     this.farmOriginX = 100 + farmXIndex * (farmPixelWidth + FARM_SPACING);
     this.farmOriginY = 100 + farmYIndex * (farmPixelHeight + FARM_SPACING);
 
@@ -342,11 +342,15 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Periodic tick
+// Periodic tick - Only update actions, broadcast less frequently
 setInterval(() => {
   updateActionsAndGrowth();
-  broadcastGameState();
 }, 200);
+
+// Broadcast full game state less frequently to reduce rubber-banding
+setInterval(() => {
+  broadcastGameState();
+}, 2000);
 
 // Health endpoint
 app.get('/health', (req, res) => {
