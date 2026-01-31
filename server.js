@@ -280,7 +280,8 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'ping':
-        ws.send(JSON.stringify({ type: 'pong' }));
+        const timestamp = msg.timestamp || Date.now();
+        ws.send(JSON.stringify({ type: 'pong', timestamp }));
         break;
 
       case 'getPing':
